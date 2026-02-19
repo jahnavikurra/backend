@@ -1,30 +1,20 @@
-import os
-from dotenv import load_dotenv
+FROM python:3.11-slim
 
-from azure.identity import DefaultAzureCredential, get_bearer_token_provider
-from openai import AzureOpenAI
+WORKDIR /app
 
-load_dotenv()
+# Install system deps for cryptography (important)
+RUN apt-get update && apt-get install -y \
+    build-essential \
+    libssl-dev \
+    libffi-dev \
+    && rm -rf /var/lib/apt/lists/*
 
-endpoint = os.environ["AZURE_OPENAI_ENDPOINT"]
-deployment = os.environ["AZURE_OPENAI_DEPLOYMENT"]
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
 
-credential = DefaultAzureCredential()
-token_provider = get_bearer_token_provider(
-    credential, "https://cognitiveservices.azure.com/.default"
-)
+COPY src ./src
 
-client = AzureOpenAI(
-    base_url=f"{endpoint.rstrip('/')}/openai/v1/",
-    api_key=token_provider,
-)
+ENV PORT=8080
+EXPOSE 8080
 
-resp = client.chat.completions.create(
-    model=deployment,
-    messages=[
-        {"role": "system", "content": "You are a helpful assistant."},
-        {"role": "user", "content": "Say hello in one sentence."},
-    ],
-)
-
-print(resp.choices[0].message.content)
+CMD ["uvicorn", "src.main:app", "--host", "0.0.0.0", "--port", "8080"]
