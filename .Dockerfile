@@ -18,3 +18,8 @@ ENV PORT=8080
 EXPOSE 8080
 
 CMD ["uvicorn", "src.main:app", "--host", "0.0.0.0", "--port", "8080"]
+
+
+curl -X POST http://localhost:8080/api/generate `
+  -H "Content-Type: application/json" `
+  -d "{\"notesText\":\"...your meeting notes...\",\"workItemType\":\"Product Backlog Item\"}"
