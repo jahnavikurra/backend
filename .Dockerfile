@@ -22,4 +22,10 @@ CMD ["uvicorn", "src.main:app", "--host", "0.0.0.0", "--port", "8080"]
 
 curl -X POST http://localhost:8080/api/generate `
   -H "Content-Type: application/json" `
-  -d "{\"notesText\":\"...your meeting notes...\",\"workItemType\":\"Product Backlog Item\"}"
+  -d '{"notesText":"Create a new endpoint that returns ISO timestamp. User: API consumer.","workItemType":"Product Backlog Item","process":"Agile"}'
+
+
+Invoke-RestMethod -Method POST `
+  -Uri "http://localhost:8080/api/generate" `
+  -ContentType "application/json" `
+  -Body '{"notesText":"Create login API with Azure Entra","workItemType":"Product Backlog Item","process":"Agile"}'
