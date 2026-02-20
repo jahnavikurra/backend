@@ -19,6 +19,7 @@ EXPOSE 8080
 
 CMD ["uvicorn", "src.main:app", "--host", "0.0.0.0", "--port", "8080"]
 
+docker exec -it workitems-api python -c "import openai, httpx; print('openai', openai.__version__); print('httpx', httpx.__version__)"
 
 curl -X POST http://localhost:8080/api/generate `
   -H "Content-Type: application/json" `
