@@ -1,7 +1,5 @@
-# src/services/llm_gate.py
-
 import json
-from typing import Any, Dict, List
+from typing import Any, Dict
 
 from openai import AzureOpenAI
 from azure.identity import DefaultAzureCredential, get_bearer_token_provider
@@ -21,9 +19,9 @@ Return STRICT JSON only with this shape:
 }
 
 Rules:
-- valid=true ONLY if the text clearly describes a feature/bug/task with an understandable goal.
+- valid=true ONLY if the text clearly describes a feature/bug/task with understandable intent.
 - If text is random, meaningless, too vague, or not actionable -> valid=false.
-- requiredQuestions should ask what is missing (e.g., goal, expected behaviour, user, scope).
+- requiredQuestions should ask what is missing (goal, expected behavior, user, scope, etc).
 - confidence between 0.0 and 1.0
 """.strip()
 
@@ -36,71 +34,80 @@ def _client() -> AzureOpenAI:
 
     credential = DefaultAzureCredential()
     token_provider = get_bearer_token_provider(
-        credential,
-        "https://cognitiveservices.azure.com/.default",
+        credential, "https://cognitiveservices.azure.com/.default"
     )
 
-    # Using /openai/v1/ pattern (same as llm.py)
     return AzureOpenAI(
-        base_url=f"{settings.AZURE_OPENAI_ENDPOINT.rstrip('/')}/openai/v1/",
-        api_key=token_provider,  # Entra token provider (NOT an API key)
+        azure_endpoint=settings.AZURE_OPENAI_ENDPOINT,
+        azure_ad_token_provider=token_provider,
+        api_version=settings.AZURE_OPENAI_API_VERSION,
     )
 
 
-def validate_notes(notes_text: str) -> Dict[str, Any]:
+def _safe_json(text: str) -> Dict[str, Any]:
     """
-    Returns:
-      {
-        "valid": bool,
-        "reason": str,
-        "requiredQuestions": List[str],
-        "confidence": float
-      }
+    Parse STRICT JSON. If the model returns extra text, try extracting first {...}.
     """
-    client = _client()
+    text = (text or "").strip()
+    try:
+        return json.loads(text)
+    except Exception:
+        start = text.find("{")
+        end = text.rfind("}")
+        if start != -1 and end != -1 and end > start:
+            try:
+                return json.loads(text[start : end + 1])
+            except Exception:
+                pass
 
+    return {
+        "valid": False,
+        "reason": "Model did not return valid JSON",
+        "requiredQuestions": ["Please provide clearer actionable requirements."],
+        "confidence": 0.0,
+    }
+
+
+def gate_validate_notes(notes: str) -> Dict[str, Any]:
+    """
+    Calls LLM as strict gate before generating work items.
+    """
+    notes = (notes or "").strip()
+
+    # quick local gate
+    if len(notes) < 10:
+        return {
+            "valid": False,
+            "reason": "Input is too short / unclear",
+            "requiredQuestions": [
+                "What feature/bug/task do you want to create? Provide clear details."
+            ],
+            "confidence": 0.2,
+        }
+
+    client = _client()
     resp = client.chat.completions.create(
         model=settings.AZURE_OPENAI_DEPLOYMENT,
+        temperature=0,
         messages=[
             {"role": "system", "content": GATE_SYSTEM_PROMPT},
-            {"role": "user", "content": notes_text.strip()},
+            {"role": "user", "content": notes},
         ],
-        response_format={"type": "json_object"},
-        temperature=0.0,
     )
 
-    raw = (resp.choices[0].message.content or "").strip()
-    if not raw:
-        raise RuntimeError("Model returned empty response")
+    content = resp.choices[0].message.content if resp and resp.choices else ""
+    data = _safe_json(content)
 
-    try:
-        data = json.loads(raw)
-    except json.JSONDecodeError as e:
-        raise RuntimeError(f"Model returned invalid JSON: {e}. Raw: {raw}")
-
-    # Normalize and validate
+    # Normalize required keys
     data.setdefault("valid", False)
-    data.setdefault("reason", "")
+    data.setdefault("reason", "No reason provided")
     data.setdefault("requiredQuestions", [])
-    data.setdefault("confidence", None)
+    data.setdefault("confidence", 0.0)
 
-    if not isinstance(data["requiredQuestions"], list):
-        data["requiredQuestions"] = [str(data["requiredQuestions"])]
-
-    conf = data.get("confidence")
-    if isinstance(conf, (int, float)):
-        if conf < 0.0:
-            data["confidence"] = 0.0
-        elif conf > 1.0:
-            data["confidence"] = 1.0
-
-    # Ensure shape types
-    data["valid"] = bool(data["valid"])
-    data["reason"] = str(data["reason"] or "")
-
-    # Optional: trim questions
-    data["requiredQuestions"] = [
-        str(q).strip() for q in data["requiredQuestions"] if str(q).strip()
-    ]
+    # Clamp confidence
+    try:
+        data["confidence"] = max(0.0, min(1.0, float(data["confidence"])))
+    except Exception:
+        data["confidence"] = 0.0
 
     return data
