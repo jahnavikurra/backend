@@ -42,19 +42,20 @@ def _client() -> AzureOpenAI:
         raise RuntimeError("Missing AZURE_OPENAI_ENDPOINT")
     if not settings.AZURE_OPENAI_DEPLOYMENT:
         raise RuntimeError("Missing AZURE_OPENAI_DEPLOYMENT")
+    if not settings.AZURE_OPENAI_API_VERSION:
+        raise RuntimeError("Missing AZURE_OPENAI_API_VERSION")
 
     credential = DefaultAzureCredential()
 
-    # Correct scope for Azure OpenAI / Cognitive Services
     token_provider = get_bearer_token_provider(
         credential,
         "https://cognitiveservices.azure.com/.default",
     )
 
-    # Use /openai/v1/ for the latest SDK pattern
     return AzureOpenAI(
-        base_url=f"{settings.AZURE_OPENAI_ENDPOINT.rstrip('/')}/openai/v1/",
-        api_key=token_provider,  # token provider (NOT an API key)
+        azure_endpoint=settings.AZURE_OPENAI_ENDPOINT.rstrip("/"),
+        api_version=settings.AZURE_OPENAI_API_VERSION,
+        azure_ad_token_provider=token_provider,
     )
 
 
@@ -96,19 +97,16 @@ Notes:
     except json.JSONDecodeError as e:
         raise RuntimeError(f"Model returned invalid JSON: {e}. Raw: {raw}")
 
-    # Normalize / defaults
     data.setdefault("acceptanceCriteria", [])
     data.setdefault("tasks", [])
     data.setdefault("assumptions", [])
     data.setdefault("confidence", None)
 
-    # Basic validation
     if not data.get("title"):
         raise RuntimeError(f"Model JSON missing 'title'. Raw: {raw}")
     if "description" not in data or data["description"] is None:
         data["description"] = ""
 
-    # Ensure lists are lists
     if not isinstance(data["acceptanceCriteria"], list):
         data["acceptanceCriteria"] = [str(data["acceptanceCriteria"])]
     if not isinstance(data["tasks"], list):
@@ -116,7 +114,6 @@ Notes:
     if not isinstance(data["assumptions"], list):
         data["assumptions"] = [str(data["assumptions"])]
 
-    # Clamp confidence if present
     conf = data.get("confidence")
     if isinstance(conf, (int, float)):
         if conf < 0.0:
