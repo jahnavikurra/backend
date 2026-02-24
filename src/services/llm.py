@@ -33,17 +33,30 @@ Rules:
 """.strip()
 
 
-def _client() -> AzureOpenAI:
+# Cache the client so we don't rebuild token provider every request
+_client_cache: Optional[AzureOpenAI] = None
+
+
+def _get_client() -> AzureOpenAI:
     """
-    Creates an AzureOpenAI client authenticated via Microsoft Entra ID
-    (no API key). Works locally (az login) and in Azure (Managed Identity).
+    Creates an AzureOpenAI client authenticated via Microsoft Entra ID (no API key).
+    Works locally (az login) and in Azure (Managed Identity).
     """
-    if not settings.AZURE_OPENAI_ENDPOINT:
+    global _client_cache
+    if _client_cache is not None:
+        return _client_cache
+
+    endpoint = (settings.AZURE_OPENAI_ENDPOINT or "").strip()
+    deployment = (settings.AZURE_OPENAI_DEPLOYMENT_NAME or settings.AZURE_OPENAI_DEPLOYMENT or "").strip()
+    api_version = (settings.AZURE_OPENAI_API_VERSION or "").strip()
+
+    if not endpoint:
         raise RuntimeError("Missing AZURE_OPENAI_ENDPOINT")
-    if not settings.AZURE_OPENAI_DEPLOYMENT:
-        raise RuntimeError("Missing AZURE_OPENAI_DEPLOYMENT")
-    if not settings.AZURE_OPENAI_API_VERSION:
-        raise RuntimeError("Missing AZURE_OPENAI_API_VERSION")
+    if not deployment:
+        raise RuntimeError("Missing AZURE_OPENAI_DEPLOYMENT_NAME (or AZURE_OPENAI_DEPLOYMENT)")
+    if not api_version:
+        # Use a safe default if you didn't set it (you can override in env)
+        api_version = "2024-02-15-preview"
 
     credential = DefaultAzureCredential()
 
@@ -52,20 +65,30 @@ def _client() -> AzureOpenAI:
         "https://cognitiveservices.azure.com/.default",
     )
 
-    return AzureOpenAI(
-        azure_endpoint=settings.AZURE_OPENAI_ENDPOINT.rstrip("/"),
-        api_version=settings.AZURE_OPENAI_API_VERSION,
+    _client_cache = AzureOpenAI(
+        azure_endpoint=endpoint.rstrip("/"),
+        api_version=api_version,
         azure_ad_token_provider=token_provider,
     )
+    return _client_cache
 
 
 def generate_work_item_draft(
     notes_text: str,
-    work_item_type: str = "PBI",
+    work_item_type: str = "Product Backlog Item",
     process: str = "Scrum",
     extra_context: Optional[str] = None,
 ) -> Dict[str, Any]:
-    client = _client()
+    """
+    Calls Azure OpenAI and returns a validated dict containing:
+    title, description, acceptanceCriteria, tasks, assumptions, confidence
+    """
+    if not notes_text or not notes_text.strip():
+        raise ValueError("notes_text is empty")
+
+    client = _get_client()
+
+    deployment = (settings.AZURE_OPENAI_DEPLOYMENT_NAME or settings.AZURE_OPENAI_DEPLOYMENT or "").strip()
 
     user_prompt = f"""
 Process: {process}
@@ -76,10 +99,10 @@ Notes:
 """.strip()
 
     if extra_context:
-        user_prompt += f"\n\nAdditional context (use only if relevant):\n{extra_context}"
+        user_prompt += f"\n\nAdditional context (use only if relevant):\n{extra_context.strip()}"
 
     resp = client.chat.completions.create(
-        model=settings.AZURE_OPENAI_DEPLOYMENT,
+        model=deployment,  # MUST be your deployment name
         messages=[
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": user_prompt},
@@ -97,15 +120,19 @@ Notes:
     except json.JSONDecodeError as e:
         raise RuntimeError(f"Model returned invalid JSON: {e}. Raw: {raw}")
 
+    # Ensure required keys exist
+    data.setdefault("title", "")
+    data.setdefault("description", "")
     data.setdefault("acceptanceCriteria", [])
     data.setdefault("tasks", [])
     data.setdefault("assumptions", [])
-    data.setdefault("confidence", None)
+    data.setdefault("confidence", 0.0)
 
-    if not data.get("title"):
-        raise RuntimeError(f"Model JSON missing 'title'. Raw: {raw}")
-    if "description" not in data or data["description"] is None:
-        data["description"] = ""
+    # Validate types / coerce
+    if not isinstance(data["title"], str):
+        data["title"] = str(data["title"])
+    if not isinstance(data["description"], str):
+        data["description"] = str(data["description"])
 
     if not isinstance(data["acceptanceCriteria"], list):
         data["acceptanceCriteria"] = [str(data["acceptanceCriteria"])]
@@ -114,11 +141,20 @@ Notes:
     if not isinstance(data["assumptions"], list):
         data["assumptions"] = [str(data["assumptions"])]
 
+    # Final required check
+    if not data["title"].strip():
+        raise RuntimeError(f"Model JSON missing non-empty 'title'. Raw: {raw}")
+
+    # Clamp confidence
     conf = data.get("confidence")
     if isinstance(conf, (int, float)):
         if conf < 0.0:
             data["confidence"] = 0.0
         elif conf > 1.0:
             data["confidence"] = 1.0
+        else:
+            data["confidence"] = float(conf)
+    else:
+        data["confidence"] = 0.0
 
     return data
