@@ -1,18 +1,18 @@
 # main.py
 
+import logging
 from typing import Optional, Literal, Any, Dict
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from src.utils.config import settings
 from src.services.llm import generate_work_item_draft
 
+logger = logging.getLogger("uvicorn.error")
 
-app = FastAPI(
-    title="Azure DevOps Work Item Assistant",
-    version="1.0.0",
-)
+app = FastAPI(title="Azure DevOps Work Item Assistant", version="1.0.0")
 
 WorkItemType = Literal["PBI", "Bug", "Task", "Feature", "Epic", "User Story"]
 
@@ -33,24 +33,35 @@ class DraftResponse(BaseModel):
     confidence: float
 
 
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request: Request, exc: Exception):
+    # Logs full stack trace in Container App logs
+    logger.exception("Unhandled exception: %s", exc)
+    return JSONResponse(
+        status_code=500,
+        content={"detail": "Internal Server Error (check logs for details)"},
+    )
+
+
 @app.get("/health")
 def health() -> Dict[str, Any]:
     return {
         "status": "ok",
         "environment": settings.ENVIRONMENT,
-        "azure_openai_endpoint_set": bool(getattr(settings, "AZURE_OPENAI_ENDPOINT", "")),
-        "azure_openai_deployment_set": bool(getattr(settings, "AZURE_OPENAI_DEPLOYMENT", "")),
+        "azure_openai_endpoint_set": bool(settings.AZURE_OPENAI_ENDPOINT),
+        "azure_openai_deployment_set": bool(settings.AZURE_OPENAI_DEPLOYMENT),
     }
 
 
 @app.get("/health/llm")
 def health_llm() -> Dict[str, Any]:
     """
-    Real end-to-end check: confirms Managed Identity auth + deployment works.
+    End-to-end check: if this fails, the issue is almost certainly
+    Managed Identity/RBAC, env vars, deployment name, or networking.
     """
     try:
         draft = generate_work_item_draft(
-            notes_text="Create a work item for adding a /health endpoint to our API.",
+            notes_text="Create a work item to add a /health endpoint.",
             work_item_type="PBI",
             process="Scrum",
         )
@@ -61,6 +72,7 @@ def health_llm() -> Dict[str, Any]:
             "confidence": draft.get("confidence"),
         }
     except Exception as e:
+        logger.exception("LLM health check failed: %s", e)
         raise HTTPException(status_code=500, detail=f"LLM health check failed: {e}")
 
 
@@ -77,4 +89,5 @@ def draft_work_item(req: DraftRequest) -> DraftResponse:
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
+        logger.exception("Draft generation failed: %s", e)
         raise HTTPException(status_code=500, detail=str(e))
