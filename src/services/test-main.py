@@ -14,19 +14,14 @@ app = FastAPI(
     version="1.0.0",
 )
 
-
-# -------------------------
-# Request / Response models
-# -------------------------
-
 WorkItemType = Literal["PBI", "Bug", "Task", "Feature", "Epic", "User Story"]
 
 
 class DraftRequest(BaseModel):
-    notes: str = Field(..., min_length=1, description="Meeting notes / requirements text")
-    workItemType: WorkItemType = Field("PBI", description="Desired Azure DevOps work item type")
-    process: str = Field("Scrum", description="Process name (Scrum / Agile / CMMI etc.)")
-    extraContext: Optional[str] = Field(None, description="Optional extra context")
+    notes: str = Field(..., min_length=1)
+    workItemType: WorkItemType = Field("PBI")
+    process: str = Field("Scrum")
+    extraContext: Optional[str] = None
 
 
 class DraftResponse(BaseModel):
@@ -38,17 +33,35 @@ class DraftResponse(BaseModel):
     confidence: float
 
 
-# -------------------------
-# Routes
-# -------------------------
-
 @app.get("/health")
 def health() -> Dict[str, Any]:
-    # Keep it simple: just show app is running + environment
     return {
         "status": "ok",
         "environment": settings.ENVIRONMENT,
+        "azure_openai_endpoint_set": bool(getattr(settings, "AZURE_OPENAI_ENDPOINT", "")),
+        "azure_openai_deployment_set": bool(getattr(settings, "AZURE_OPENAI_DEPLOYMENT", "")),
     }
+
+
+@app.get("/health/llm")
+def health_llm() -> Dict[str, Any]:
+    """
+    Real end-to-end check: confirms Managed Identity auth + deployment works.
+    """
+    try:
+        draft = generate_work_item_draft(
+            notes_text="Create a work item for adding a /health endpoint to our API.",
+            work_item_type="PBI",
+            process="Scrum",
+        )
+        return {
+            "status": "ok",
+            "model_call": "success",
+            "sample_title": draft.get("title"),
+            "confidence": draft.get("confidence"),
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"LLM health check failed: {e}")
 
 
 @app.post("/api/work-items/draft", response_model=DraftResponse)
@@ -62,23 +75,6 @@ def draft_work_item(req: DraftRequest) -> DraftResponse:
         )
         return DraftResponse(**data)
     except ValueError as e:
-        # Bad input
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
-        # LLM/auth/runtime issues
         raise HTTPException(status_code=500, detail=str(e))
-
-
-# Optional: if you later add Azure DevOps creation logic, wire it here.
-class CreateRequest(BaseModel):
-    # If you want, you can pass draft JSON directly to creation
-    draft: DraftResponse
-
-
-@app.post("/api/work-items/create")
-def create_work_item(req: CreateRequest) -> Dict[str, Any]:
-    # Placeholder so your API surface is ready
-    raise HTTPException(
-        status_code=501,
-        detail="Not implemented. Add Azure DevOps create logic in src/services/ado.py and call it here.",
-    )
