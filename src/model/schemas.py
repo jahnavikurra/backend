@@ -1,14 +1,10 @@
 from typing import Any, Dict, List, Optional
-
 from pydantic import BaseModel, Field
 
 
 class GenerateRequest(BaseModel):
-    notes: str = Field(..., min_length=1, description="User notes or meeting text")
-    work_item_type: str = Field(
-        default="Product Backlog Item",
-        description="Azure DevOps work item type",
-    )
+    notes: str = Field(..., min_length=1)
+    work_item_type: str = "Product Backlog Item"
     title_hint: Optional[str] = None
     area_path: Optional[str] = None
     iteration_path: Optional[str] = None
@@ -31,11 +27,3 @@ class GenerateResponse(BaseModel):
     fields: Dict[str, Any]
     relations: List[Dict[str, Any]] = Field(default_factory=list)
     ado_result: Optional[Dict[str, Any]] = None
-
-
-class GateResult(BaseModel):
-    action: str
-    messageToUser: str
-    questions: List[str]
-    assumptions: List[str]
-    confidence: float
