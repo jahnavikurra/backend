@@ -1,84 +1,77 @@
-# main.py
+import json
+from typing import Any, Dict, Optional
 
-from typing import Optional, Literal, Any, Dict
-
-from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel, Field
+from openai import AzureOpenAI
+from azure.identity import DefaultAzureCredential, get_bearer_token_provider
 
 from src.utils.config import settings
-from src.services.llm import generate_work_item_draft
 
 
-app = FastAPI(
-    title="Azure DevOps Work Item Assistant",
-    version="1.0.0",
-)
+SYSTEM_PROMPT = """
+You are an Azure DevOps Work Item Assistant.
+
+Turn short notes into a structured work item.
+
+Return JSON with this structure:
+
+{
+"title": "string",
+"description": "string",
+"valueStatement": "string",
+"acceptanceCriteria": ["string"],
+"tasks": ["string"],
+"assumptions": ["string"],
+"dependencies": ["string"],
+"questions": ["string"],
+"confidence": 0.0
+}
+"""
 
 
-# -------------------------
-# Request / Response models
-# -------------------------
+def _client() -> AzureOpenAI:
 
-WorkItemType = Literal["PBI", "Bug", "Task", "Feature", "Epic", "User Story"]
+    credential = DefaultAzureCredential()
 
-
-class DraftRequest(BaseModel):
-    notes: str = Field(..., min_length=1, description="Meeting notes / requirements text")
-    workItemType: WorkItemType = Field("PBI", description="Desired Azure DevOps work item type")
-    process: str = Field("Scrum", description="Process name (Scrum / Agile / CMMI etc.)")
-    extraContext: Optional[str] = Field(None, description="Optional extra context")
-
-
-class DraftResponse(BaseModel):
-    title: str
-    description: str
-    acceptanceCriteria: list[str]
-    tasks: list[str]
-    assumptions: list[str]
-    confidence: float
-
-
-# -------------------------
-# Routes
-# -------------------------
-
-@app.get("/health")
-def health() -> Dict[str, Any]:
-    # Keep it simple: just show app is running + environment
-    return {
-        "status": "ok",
-        "environment": settings.ENVIRONMENT,
-    }
-
-
-@app.post("/api/work-items/draft", response_model=DraftResponse)
-def draft_work_item(req: DraftRequest) -> DraftResponse:
-    try:
-        data = generate_work_item_draft(
-            notes_text=req.notes,
-            work_item_type=req.workItemType,
-            process=req.process,
-            extra_context=req.extraContext,
-        )
-        return DraftResponse(**data)
-    except ValueError as e:
-        # Bad input
-        raise HTTPException(status_code=400, detail=str(e))
-    except Exception as e:
-        # LLM/auth/runtime issues
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-# Optional: if you later add Azure DevOps creation logic, wire it here.
-class CreateRequest(BaseModel):
-    # If you want, you can pass draft JSON directly to creation
-    draft: DraftResponse
-
-
-@app.post("/api/work-items/create")
-def create_work_item(req: CreateRequest) -> Dict[str, Any]:
-    # Placeholder so your API surface is ready
-    raise HTTPException(
-        status_code=501,
-        detail="Not implemented. Add Azure DevOps create logic in src/services/ado.py and call it here.",
+    token_provider = get_bearer_token_provider(
+        credential,
+        "https://cognitiveservices.azure.com/.default",
     )
+
+    return AzureOpenAI(
+        azure_endpoint=settings.AZURE_OPENAI_ENDPOINT,
+        azure_ad_token_provider=token_provider,
+        api_version=settings.AZURE_OPENAI_API_VERSION,
+    )
+
+
+def generate_work_item_draft(
+    notes_text: str,
+    work_item_type: str = "PBI",
+    extra_context: Optional[str] = None,
+) -> Dict[str, Any]:
+
+    client = _client()
+
+    prompt = f"""
+Work Item Type: {work_item_type}
+
+Notes:
+{notes_text}
+"""
+
+    if extra_context:
+        prompt += f"\nContext:\n{extra_context}"
+
+    resp = client.chat.completions.create(
+        model=settings.AZURE_OPENAI_DEPLOYMENT,
+        temperature=0.2,
+        response_format={"type": "json_object"},
+        messages=[
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": prompt},
+        ],
+    )
+
+    content = resp.choices[0].message.content
+
+    return json.loads(content)
