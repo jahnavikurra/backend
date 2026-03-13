@@ -1,35 +1,16 @@
-from fastapi import FastAPI, HTTPException
-
-from src.models.schemas import GenerateRequest, GenerateResponse
-from src.services.ado import build_patch_document, create_work_item
-from src.services.llm import generate_work_item_content
-from src.utils.config import settings
-from src.utils.validator import validate_notes_text
-
-app = FastAPI(
-    title="AI Work Item Assistant",
-    version="1.0.0",
-)
-
-
-@app.get("/health")
-def health() -> dict:
-    return {
-        "status": "ok",
-        "environment": settings.ENVIRONMENT,
-    }
-
-
 @app.post("/generate", response_model=GenerateResponse)
 def generate(request: GenerateRequest) -> GenerateResponse:
     is_valid, message = validate_notes_text(request.notes)
     if not is_valid:
         raise HTTPException(status_code=400, detail=message)
 
-    generated = generate_work_item_content(
-        notes=request.notes,
-        work_item_type=request.work_item_type,
-    )
+    try:
+        generated = generate_work_item_content(
+            notes=request.notes,
+            work_item_type=request.work_item_type,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
 
     area_path = request.area_path
     iteration_path = request.iteration_path
