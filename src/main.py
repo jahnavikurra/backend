@@ -1,230 +1,72 @@
-import logging
-from typing import Optional, Literal, Any, Dict, List
+from fastapi import FastAPI, HTTPException
 
-from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field
-
+from src.models.schemas import GenerateRequest, GenerateResponse
+from src.services.ado import build_patch_document, create_work_item
+from src.services.llm import generate_work_item_content
+from src.services.llm_gate import gate_notes
 from src.utils.config import settings
-from src.services.llm import generate_work_item_draft
-from src.services.llm_gate import soft_gate
-from src.services.ado import create_work_item
+from src.utils.validator import validate_notes
 
-logger = logging.getLogger("uvicorn.error")
+app = FastAPI(
+    title="AI Work Item Assistant",
+    version="1.0.0",
+)
 
-app = FastAPI(title="Azure DevOps Work Item Assistant", version="1.3.0")
-
-WorkItemType = Literal["PBI", "Bug", "Task", "Feature", "Epic", "User Story"]
-
-
-# -------------------------
-# Models
-# -------------------------
-
-class DraftRequest(BaseModel):
-    notes: str = Field(..., min_length=1)
-    project: str = Field(..., min_length=1)
-    team: Optional[str] = None
-    workItemType: WorkItemType = Field("PBI")
-    extraContext: Optional[str] = None
-
-
-class GateResponse(BaseModel):
-    action: Literal["create_draft", "ask_questions_only"]
-    messageToUser: str
-    questions: List[str] = Field(default_factory=list)
-    assumptions: List[str] = Field(default_factory=list)
-    confidence: float
-
-
-class DraftResponse(BaseModel):
-    title: str
-    description: str
-    valueStatement: str = ""
-    acceptanceCriteria: List[str] = Field(default_factory=list)
-    tasks: List[str] = Field(default_factory=list)
-    assumptions: List[str] = Field(default_factory=list)
-    dependencies: List[str] = Field(default_factory=list)
-    questions: List[str] = Field(default_factory=list)
-    confidence: float
-
-
-class DraftWithGateResponse(BaseModel):
-    gate: GateResponse
-    draft: Optional[DraftResponse] = None
-
-
-class CreateRequest(BaseModel):
-    notes: str = Field(..., min_length=1)
-    project: str = Field(..., min_length=1)
-    team: Optional[str] = None
-    workItemType: WorkItemType = Field("PBI")
-    extraContext: Optional[str] = None
-
-
-class CreateResponse(BaseModel):
-    created: bool
-    workItemId: Optional[int] = None
-    workItemUrl: Optional[str] = None
-    project: Optional[str] = None
-    team: Optional[str] = None
-    draft: Optional[DraftResponse] = None
-    gate: GateResponse
-
-
-# -------------------------
-# Error Handling
-# -------------------------
-
-@app.exception_handler(Exception)
-async def unhandled_exception_handler(request: Request, exc: Exception):
-    logger.exception("Unhandled exception: %s", exc)
-    return JSONResponse(
-        status_code=500,
-        content={"detail": "Internal Server Error (check logs)"},
-    )
-
-
-# -------------------------
-# Health
-# -------------------------
 
 @app.get("/health")
-def health() -> Dict[str, Any]:
-    return {
-        "status": "ok",
-        "environment": settings.ENVIRONMENT,
+def health() -> dict:
+    return {"status": "ok", "environment": settings.ENVIRONMENT}
+
+
+@app.post("/generate", response_model=GenerateResponse)
+def generate(request: GenerateRequest) -> GenerateResponse:
+    is_valid, message = validate_notes(request.notes)
+    if not is_valid:
+        raise HTTPException(status_code=400, detail=message)
+
+    gate_result = gate_notes(request.notes)
+    if gate_result.get("action") == "ask_questions_only":
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "message": gate_result.get("messageToUser", "Need more details."),
+                "questions": gate_result.get("questions", []),
+                "assumptions": gate_result.get("assumptions", []),
+                "confidence": gate_result.get("confidence", 0.0),
+            },
+        )
+
+    generated = generate_work_item_content(
+        notes=request.notes,
+        work_item_type=request.work_item_type,
+    )
+
+    area_path = request.area_path or settings.ADO_DEFAULT_AREA_PATH
+    iteration_path = request.iteration_path or settings.ADO_DEFAULT_ITERATION_PATH
+
+    fields = {
+        "System.AreaPath": area_path,
+        "System.IterationPath": iteration_path,
     }
 
+    response_payload = {
+        "work_item_type": request.work_item_type,
+        "generated": generated,
+        "fields": fields,
+        "relations": [],
+        "ado_result": None,
+    }
 
-@app.get("/health/llm")
-def health_llm() -> Dict[str, Any]:
-    try:
-        draft = generate_work_item_draft(
-            notes_text="Add logging improvements",
-            work_item_type="Task",
+    if request.create_in_ado:
+        patch_document = build_patch_document(
+            title=generated["title"],
+            description=generated["description"],
+            acceptance_criteria=generated.get("acceptanceCriteria", []),
+            area_path=area_path,
+            iteration_path=iteration_path,
+            extra_fields=generated.get("extraFields", {}),
         )
-        return {
-            "status": "ok",
-            "sample_title": draft.get("title"),
-            "confidence": draft.get("confidence"),
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        ado_result = create_work_item(request.work_item_type, patch_document)
+        response_payload["ado_result"] = ado_result
 
-
-# -------------------------
-# Helpers
-# -------------------------
-
-def build_merged_context(
-    extra_context: Optional[str],
-    team: Optional[str],
-    gate: Dict[str, Any],
-) -> Optional[str]:
-    parts: List[str] = []
-
-    if extra_context and extra_context.strip():
-        parts.append(extra_context.strip())
-
-    if team and team.strip():
-        parts.append(f"Current Azure DevOps team context: {team.strip()}")
-
-    assumptions = gate.get("assumptions", []) or []
-    if assumptions:
-        assumptions_block = "\n".join(
-            [f"- {item}" for item in assumptions if str(item).strip()]
-        )
-        if assumptions_block:
-            parts.append(f"Assumptions:\n{assumptions_block}")
-
-    if not parts:
-        return None
-
-    return "\n\n".join(parts)
-
-
-# -------------------------
-# Draft Endpoint
-# -------------------------
-
-@app.post("/api/work-items/draft", response_model=DraftWithGateResponse)
-def draft_work_item(req: DraftRequest) -> DraftWithGateResponse:
-    gate = soft_gate(req.notes, req.workItemType)
-
-    if gate["action"] == "ask_questions_only":
-        return DraftWithGateResponse(
-            gate=GateResponse(**gate),
-            draft=None,
-        )
-
-    merged_context = build_merged_context(
-        extra_context=req.extraContext,
-        team=req.team,
-        gate=gate,
-    )
-
-    draft = generate_work_item_draft(
-        notes_text=req.notes,
-        work_item_type=req.workItemType,
-        extra_context=merged_context,
-    )
-
-    if not draft.get("questions") and gate.get("questions"):
-        draft["questions"] = gate["questions"]
-
-    return DraftWithGateResponse(
-        gate=GateResponse(**gate),
-        draft=DraftResponse(**draft),
-    )
-
-
-# -------------------------
-# Create Work Item Endpoint
-# -------------------------
-
-@app.post("/api/work-items/create", response_model=CreateResponse)
-def create_work_item_endpoint(req: CreateRequest) -> CreateResponse:
-    gate = soft_gate(req.notes, req.workItemType)
-
-    if gate["action"] == "ask_questions_only":
-        return CreateResponse(
-            created=False,
-            project=req.project,
-            team=req.team,
-            gate=GateResponse(**gate),
-            draft=None,
-        )
-
-    merged_context = build_merged_context(
-        extra_context=req.extraContext,
-        team=req.team,
-        gate=gate,
-    )
-
-    draft = generate_work_item_draft(
-        notes_text=req.notes,
-        work_item_type=req.workItemType,
-        extra_context=merged_context,
-    )
-
-    if not draft.get("questions") and gate.get("questions"):
-        draft["questions"] = gate["questions"]
-
-    ado = create_work_item(
-        project=req.project,
-        title=draft["title"],
-        description_md=draft["description"],
-        acceptance_criteria=draft.get("acceptanceCriteria", []),
-        work_item_type=req.workItemType,
-    )
-
-    return CreateResponse(
-        created=True,
-        workItemId=ado.get("id"),
-        workItemUrl=ado.get("url"),
-        project=req.project,
-        team=req.team,
-        draft=DraftResponse(**draft),
-        gate=GateResponse(**gate),
-    )
+    return GenerateResponse(**response_payload)
