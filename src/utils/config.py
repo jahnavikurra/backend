@@ -1,26 +1,32 @@
-# src/utils/config.py
-
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
+
     # ----------------------------------
-    # Azure OpenAI (Entra ID only)
+    # Azure OpenAI
     # ----------------------------------
     AZURE_OPENAI_ENDPOINT: str
     AZURE_OPENAI_DEPLOYMENT: str
+    AZURE_OPENAI_API_VERSION: str
 
     # ----------------------------------
     # Azure DevOps
     # ----------------------------------
     ADO_ORG_URL: str
     ADO_PROJECT: str
-    ADO_PAT: str  # or later replace with ADO OAuth if required
 
     # ----------------------------------
-    # Environment Settings
+    # Service Principal
     # ----------------------------------
-    ENVIRONMENT: str = "local"  # local | dev | prod
+    AZURE_TENANT_ID: str
+    AZURE_CLIENT_ID: str
+    AZURE_CLIENT_SECRET: str
+
+    # ----------------------------------
+    # Environment
+    # ----------------------------------
+    ENVIRONMENT: str = "local"
 
     model_config = SettingsConfigDict(
         env_file=".env",
