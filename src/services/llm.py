@@ -1,155 +1,84 @@
 import json
-from typing import Any, Dict, Optional
+from typing import Any, Dict
 
-from openai import AzureOpenAI
 from azure.identity import DefaultAzureCredential, get_bearer_token_provider
+from openai import AzureOpenAI
 
 from src.utils.config import settings
 
 
 SYSTEM_PROMPT = """
 You are an Azure DevOps Work Item Assistant.
-
-Turn even SHORT user notes into a useful first-draft work item.
-Do NOT refuse for lack of detail. Instead:
-- make reasonable assumptions (list them in assumptions)
-- ask missing details (list them in questions)
+Generate a clean work item draft from the user's notes.
 
 Return STRICT JSON with this exact shape:
 {
   "title": "string",
-  "description": "string (markdown)",
-  "valueStatement": "string",
-  "acceptanceCriteria": ["string", "..."],
-  "tasks": ["string", "..."],
-  "assumptions": ["string", "..."],
-  "dependencies": ["string", "..."],
-  "questions": ["string", "..."],
-  "confidence": 0.0
+  "description": "string",
+  "acceptanceCriteria": ["string"],
+  "tasks": ["string"],
+  "assumptions": ["string"],
+  "confidence": 0.0,
+  "extraFields": {}
 }
 
 Rules:
-- Title <= 120 characters
-- Description should be structured and action-oriented
-- Acceptance criteria must be testable
-- Tasks must be actionable steps
-- assumptions: reasonable guesses when info missing (no sensitive IDs)
-- dependencies: only if likely (approvals, maintenance window, infra/permissions)
-- questions: what to ask to finalize scope/validation
-- confidence between 0.0 and 1.0
-- Output JSON only. No extra keys.
-""".strip()
+- Title must be concise and useful.
+- Description must be structured markdown.
+- Acceptance criteria must be testable.
+- Tasks must be actionable.
+- If details are missing, add them to assumptions.
+- confidence must be between 0 and 1.
+- extraFields should usually be {} unless clearly needed.
+"""
 
 
-def _client() -> AzureOpenAI:
-    if not settings.AZURE_OPENAI_ENDPOINT:
-        raise RuntimeError("Missing AZURE_OPENAI_ENDPOINT")
-    if not settings.AZURE_OPENAI_DEPLOYMENT:
-        raise RuntimeError("Missing AZURE_OPENAI_DEPLOYMENT")
-    if not settings.AZURE_OPENAI_API_VERSION:
-        raise RuntimeError("Missing AZURE_OPENAI_API_VERSION")
-
-    credential = DefaultAzureCredential()
+def _get_client() -> AzureOpenAI:
     token_provider = get_bearer_token_provider(
-        credential,
+        DefaultAzureCredential(managed_identity_client_id=settings.AZURE_CLIENT_ID),
         "https://cognitiveservices.azure.com/.default",
     )
 
     return AzureOpenAI(
-        azure_endpoint=settings.AZURE_OPENAI_ENDPOINT.rstrip("/"),
-        api_version=settings.AZURE_OPENAI_API_VERSION,
+        azure_endpoint=settings.AZURE_OPENAI_ENDPOINT,
         azure_ad_token_provider=token_provider,
+        api_version="2024-02-01",
     )
 
 
-def generate_work_item_draft(
-    notes_text: str,
-    work_item_type: str = "PBI",
-    extra_context: Optional[str] = None,
-) -> Dict[str, Any]:
-    notes_text = (notes_text or "").strip()
-
-    if not notes_text:
-        return {
-            "title": "New Work Item",
-            "description": "Draft created from empty input. Please add details.",
-            "valueStatement": "Improve clarity and track work.",
-            "acceptanceCriteria": [
-                "Requester provides requirements and validation steps."
-            ],
-            "tasks": [
-                "Collect requirements",
-                "Define acceptance criteria",
-            ],
-            "assumptions": [],
-            "dependencies": [],
-            "questions": [
-                "What do you want to build/fix?",
-                "What does success look like?",
-            ],
-            "confidence": 0.2,
-        }
-
-    client = _client()
+def generate_work_item_content(notes: str, work_item_type: str) -> Dict[str, Any]:
+    client = _get_client()
 
     user_prompt = f"""
-WorkItemType: {work_item_type}
+Work item type: {work_item_type}
 
-User Notes (may be short):
-{notes_text}
-""".strip()
+Notes:
+{notes}
+"""
 
-    if extra_context:
-        user_prompt += (
-            f"\n\nAdditional context (use if relevant):\n{extra_context.strip()}"
-        )
-
-    resp = client.chat.completions.create(
+    response = client.chat.completions.create(
         model=settings.AZURE_OPENAI_DEPLOYMENT,
+        temperature=0.2,
         messages=[
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": user_prompt},
         ],
-        response_format={"type": "json_object"},
-        temperature=0.2,
     )
 
-    raw = (resp.choices[0].message.content or "").strip()
-    if not raw:
-        raise RuntimeError("Model returned empty response")
+    content = response.choices[0].message.content or "{}"
 
     try:
-        data = json.loads(raw)
-    except json.JSONDecodeError as e:
-        raise RuntimeError(f"Model returned invalid JSON: {e}. Raw: {raw}")
+        parsed = json.loads(content)
+    except json.JSONDecodeError:
+        parsed = {
+            "title": "Generated Work Item",
+            "description": f"## Summary\n\n{notes}",
+            "acceptanceCriteria": ["Review and refine generated output."],
+            "tasks": ["Validate notes", "Refine title", "Confirm acceptance criteria"],
+            "assumptions": ["Model returned non-JSON; fallback response used."],
+            "confidence": 0.4,
+            "extraFields": {},
+        }
 
-    data.setdefault("title", "New Work Item")
-    data.setdefault("description", "")
-    data.setdefault("valueStatement", "")
-    data.setdefault("acceptanceCriteria", [])
-    data.setdefault("tasks", [])
-    data.setdefault("assumptions", [])
-    data.setdefault("dependencies", [])
-    data.setdefault("questions", [])
-    data.setdefault("confidence", 0.5)
-
-    for k in [
-        "acceptanceCriteria",
-        "tasks",
-        "assumptions",
-        "dependencies",
-        "questions",
-    ]:
-        if not isinstance(data.get(k), list):
-            data[k] = [str(data.get(k))]
-
-    try:
-        c = float(data.get("confidence", 0.5))
-        data["confidence"] = max(0.0, min(1.0, c))
-    except Exception:
-        data["confidence"] = 0.5
-
-    if not str(data.get("title", "")).strip():
-        data["title"] = "New Work Item"
-
-    return data
+    parsed.setdefault("extraFields", {})
+    return parsed
