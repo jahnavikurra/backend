@@ -3,9 +3,8 @@ from fastapi import FastAPI, HTTPException
 from src.models.schemas import GenerateRequest, GenerateResponse
 from src.services.ado import build_patch_document, create_work_item
 from src.services.llm import generate_work_item_content
-from src.services.llm_gate import gate_notes
 from src.utils.config import settings
-from src.utils.validator import validate_notes
+from src.utils.validator import validate_notes_text
 
 app = FastAPI(
     title="AI Work Item Assistant",
@@ -15,34 +14,25 @@ app = FastAPI(
 
 @app.get("/health")
 def health() -> dict:
-    return {"status": "ok", "environment": settings.ENVIRONMENT}
+    return {
+        "status": "ok",
+        "environment": settings.ENVIRONMENT,
+    }
 
 
 @app.post("/generate", response_model=GenerateResponse)
 def generate(request: GenerateRequest) -> GenerateResponse:
-    is_valid, message = validate_notes(request.notes)
+    is_valid, message = validate_notes_text(request.notes)
     if not is_valid:
         raise HTTPException(status_code=400, detail=message)
-
-    gate_result = gate_notes(request.notes)
-    if gate_result.get("action") == "ask_questions_only":
-        raise HTTPException(
-            status_code=400,
-            detail={
-                "message": gate_result.get("messageToUser", "Need more details."),
-                "questions": gate_result.get("questions", []),
-                "assumptions": gate_result.get("assumptions", []),
-                "confidence": gate_result.get("confidence", 0.0),
-            },
-        )
 
     generated = generate_work_item_content(
         notes=request.notes,
         work_item_type=request.work_item_type,
     )
 
-    area_path = request.area_path or settings.ADO_DEFAULT_AREA_PATH
-    iteration_path = request.iteration_path or settings.ADO_DEFAULT_ITERATION_PATH
+    area_path = request.area_path
+    iteration_path = request.iteration_path
 
     fields = {
         "System.AreaPath": area_path,
@@ -66,7 +56,17 @@ def generate(request: GenerateRequest) -> GenerateResponse:
             iteration_path=iteration_path,
             extra_fields=generated.get("extraFields", {}),
         )
-        ado_result = create_work_item(request.work_item_type, patch_document)
-        response_payload["ado_result"] = ado_result
+
+        try:
+            ado_result = create_work_item(
+                work_item_type=request.work_item_type,
+                patch_document=patch_document,
+            )
+            response_payload["ado_result"] = ado_result
+        except Exception as exc:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to create work item in Azure DevOps: {str(exc)}",
+            ) from exc
 
     return GenerateResponse(**response_payload)
