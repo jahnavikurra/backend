@@ -1,78 +1,44 @@
+import base64
 from typing import Any, Dict, List
 
 import requests
-from azure.identity import ClientSecretCredential
 
 from src.utils.config import settings
+from src.utils.keyvault import get_secret_from_key_vault
 
 
-ADO_SCOPE = "499b84ac-1321-427f-aa17-267ca6975798/.default"
+def _get_ado_pat() -> str:
+    if not settings.ADO_PAT_SECRET_NAME:
+        raise ValueError("ADO_PAT_SECRET_NAME is not configured.")
+    return get_secret_from_key_vault(settings.ADO_PAT_SECRET_NAME)
 
 
-def get_ado_access_token() -> str:
-    """
-    Fetch Azure DevOps token using Service Principal
-    """
+def _get_auth_headers() -> Dict[str, str]:
+    pat = _get_ado_pat()
+    encoded_pat = base64.b64encode(f":{pat}".encode("utf-8")).decode("utf-8")
 
-    credential = ClientSecretCredential(
-        tenant_id=settings.AZURE_TENANT_ID,
-        client_id=settings.AZURE_CLIENT_ID,
-        client_secret=settings.AZURE_CLIENT_SECRET,
-    )
-
-    token = credential.get_token(ADO_SCOPE)
-
-    return token.token
+    return {
+        "Content-Type": "application/json-patch+json",
+        "Authorization": f"Basic {encoded_pat}",
+    }
 
 
-def render_description_html(description_md: str) -> str:
-
-    if not description_md:
-        return ""
-
-    return f"<div>{description_md}</div>"
-
-
-def create_work_item(
-    *,
+def build_patch_document(
     title: str,
-    description_md: str,
+    description: str,
     acceptance_criteria: List[str],
-    work_item_type: str,
-) -> Dict[str, Any]:
-
-    if not settings.ADO_ORG_URL:
-        raise RuntimeError("ADO_ORG_URL missing")
-
-    if not settings.ADO_PROJECT:
-        raise RuntimeError("ADO_PROJECT missing")
-
-    wit = work_item_type.strip()
-
-    if wit.upper() == "PBI":
-        wit = "Product Backlog Item"
-
-    url = (
-        f"{settings.ADO_ORG_URL}/{settings.ADO_PROJECT}"
-        f"/_apis/wit/workitems/${wit}?api-version=7.1"
-    )
-
-    ac_text = ""
-
-    if acceptance_criteria:
-        ac_text = "\n".join([f"- {x}" for x in acceptance_criteria])
-
-    patch_ops: List[Dict[str, Any]] = [
+    area_path: str | None = None,
+    iteration_path: str | None = None,
+    extra_fields: Dict[str, Any] | None = None,
+) -> List[Dict[str, Any]]:
+    patch_document: List[Dict[str, Any]] = [
         {"op": "add", "path": "/fields/System.Title", "value": title},
-        {
-            "op": "add",
-            "path": "/fields/System.Description",
-            "value": render_description_html(description_md),
-        },
+        {"op": "add", "path": "/fields/System.Description", "value": description},
     ]
 
-    if ac_text:
-        patch_ops.append(
+    if acceptance_criteria:
+        ac_text = "<br/>".join([f"- {item}" for item in acceptance_criteria])
+        patch_document.append(
             {
                 "op": "add",
                 "path": "/fields/Microsoft.VSTS.Common.AcceptanceCriteria",
@@ -80,27 +46,42 @@ def create_work_item(
             }
         )
 
-    headers = {
-        "Authorization": f"Bearer {get_ado_access_token()}",
-        "Content-Type": "application/json-patch+json",
-    }
+    if area_path:
+        patch_document.append(
+            {"op": "add", "path": "/fields/System.AreaPath", "value": area_path}
+        )
 
-    resp = requests.post(url, headers=headers, json=patch_ops)
+    if iteration_path:
+        patch_document.append(
+            {
+                "op": "add",
+                "path": "/fields/System.IterationPath",
+                "value": iteration_path,
+            }
+        )
 
-    if not resp.ok:
-        raise RuntimeError(resp.text)
+    if extra_fields:
+        for field_name, field_value in extra_fields.items():
+            patch_document.append(
+                {"op": "add", "path": f"/fields/{field_name}", "value": field_value}
+            )
 
-    data = resp.json()
+    return patch_document
 
-    work_item_id = data.get("id")
 
-    browser_url = (
-        f"{settings.ADO_ORG_URL}/{settings.ADO_PROJECT}"
-        f"/_workitems/edit/{work_item_id}"
+def create_work_item(work_item_type: str, patch_document: List[Dict[str, Any]]) -> Dict[str, Any]:
+    url = (
+        f"https://dev.azure.com/{settings.ADO_ORGANIZATION}/"
+        f"{settings.ADO_PROJECT}/_apis/wit/workitems/"
+        f"${work_item_type}?api-version=7.1"
     )
 
-    return {
-        "id": work_item_id,
-        "url": browser_url,
-        "raw": data,
-    }
+    response = requests.post(
+        url,
+        headers=_get_auth_headers(),
+        json=patch_document,
+        timeout=30,
+    )
+
+    response.raise_for_status()
+    return response.json()
