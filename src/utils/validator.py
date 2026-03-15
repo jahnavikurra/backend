@@ -1,10 +1,16 @@
-def validate_notes(notes: str) -> tuple[bool, str]:
+from typing import Tuple
+
+
+def validate_notes_text(notes: str) -> Tuple[bool, str]:
     cleaned = (notes or "").strip()
 
     if not cleaned:
         return False, "Notes cannot be empty."
 
     if len(cleaned) < 8:
-        return False, "Please provide a little more context so I can generate a useful work item."
+        return False, "Please provide a little more context so a useful work item can be generated."
+
+    if len(cleaned) > 20000:
+        return False, "Notes are too long."
 
     return True, ""
