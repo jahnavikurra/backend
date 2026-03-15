@@ -5,19 +5,19 @@ from src.utils.config import settings
 
 
 def _get_vault_url() -> str:
-    if settings.AZURE_KEY_VAULT_URL:
-        return settings.AZURE_KEY_VAULT_URL.rstrip("/")
-
-    if settings.AZURE_KEY_VAULT_NAME:
-        return f"https://{settings.AZURE_KEY_VAULT_NAME}.vault.azure.net"
+    if settings.resolved_key_vault_url:
+        return settings.resolved_key_vault_url
 
     raise ValueError("Azure Key Vault URL or name is not configured.")
 
 
 def _get_credential() -> DefaultAzureCredential:
-    return DefaultAzureCredential(
-        managed_identity_client_id=settings.AZURE_CLIENT_ID
-    )
+    if settings.AZURE_CLIENT_ID:
+        return DefaultAzureCredential(
+            managed_identity_client_id=settings.AZURE_CLIENT_ID
+        )
+
+    return DefaultAzureCredential()
 
 
 def get_secret_from_key_vault(secret_name: str) -> str:
@@ -29,4 +29,8 @@ def get_secret_from_key_vault(secret_name: str) -> str:
         credential=_get_credential(),
     )
 
-    return client.get_secret(secret_name).value
+    value = client.get_secret(secret_name).value
+    if not value:
+        raise ValueError(f"Secret '{secret_name}' is empty or not found.")
+
+    return value
