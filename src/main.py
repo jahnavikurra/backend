@@ -1,21 +1,33 @@
-from typing import Any, Dict
+import logging
 
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 
-from src.models.schemas import GenerateRequest, GenerateResponse
-from src.services.ado import build_patch_document, create_work_item
+from src.models.schemas import AdoResult, GenerateRequest, GenerateResponse, GeneratedContent
+from src.services.ado import create_work_item
 from src.services.llm import generate_work_item_content
 from src.utils.config import settings
 from src.utils.validator import validate_notes_text
+
+logging.basicConfig(level=getattr(logging, settings.LOG_LEVEL.upper(), logging.INFO))
+logger = logging.getLogger(__name__)
 
 app = FastAPI(
     title="AI Work Item Assistant",
     version="1.0.0",
 )
 
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # tighten later for production
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 
 @app.get("/health")
-def health() -> Dict[str, Any]:
+def health() -> dict:
     return {
         "status": "ok",
         "environment": settings.ENVIRONMENT,
@@ -29,63 +41,42 @@ def generate(request: GenerateRequest) -> GenerateResponse:
         raise HTTPException(status_code=400, detail=message)
 
     try:
-        generated = generate_work_item_content(
+        generated_raw = generate_work_item_content(
             notes=request.notes,
             work_item_type=request.work_item_type,
-            title_hint=request.title_hint,
         )
+        generated = GeneratedContent(**generated_raw)
+
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        logger.exception("LLM generation failed")
+        raise HTTPException(status_code=500, detail=f"LLM generation failed: {str(exc)}") from exc
 
-    area_path = request.area_path or settings.ADO_DEFAULT_AREA_PATH
-    iteration_path = request.iteration_path or settings.ADO_DEFAULT_ITERATION_PATH
-
-    fields = {
-        "System.AreaPath": area_path,
-        "System.IterationPath": iteration_path,
-    }
-
-    response_payload = {
-        "work_item_type": request.work_item_type,
-        "generated": generated,
-        "fields": fields,
-        "relations": [],
-        "ado_result": None,
-    }
+    ado_result = None
 
     if request.create_in_ado:
-        if not area_path:
+        if not request.project_name or not request.project_name.strip():
             raise HTTPException(
                 status_code=400,
-                detail="area_path is required when create_in_ado is true.",
-            )
-
-        if not iteration_path:
-            raise HTTPException(
-                status_code=400,
-                detail="iteration_path is required when create_in_ado is true.",
+                detail="project_name is required when create_in_ado=true",
             )
 
         try:
-            patch_document = build_patch_document(
-                title=generated["title"],
-                description=generated["description"],
-                acceptance_criteria=generated.get("acceptanceCriteria", []),
-                area_path=area_path,
-                iteration_path=iteration_path,
-                extra_fields=generated.get("extraFields", {}),
-            )
-
-            ado_result = create_work_item(
+            ado_raw = create_work_item(
+                project=request.project_name.strip(),
                 work_item_type=request.work_item_type,
-                patch_document=patch_document,
+                title=generated.title,
+                description=generated.description,
+                acceptance_criteria=generated.acceptanceCriteria,
             )
-            response_payload["ado_result"] = ado_result
+            ado_result = AdoResult(**ado_raw)
 
         except Exception as exc:
-            raise HTTPException(
-                status_code=500,
-                detail=f"Failed to create work item in Azure DevOps: {str(exc)}",
-            ) from exc
+            logger.exception("ADO creation failed")
+            raise HTTPException(status_code=500, detail=f"ADO creation failed: {str(exc)}") from exc
 
-    return GenerateResponse(**response_payload)
+    return GenerateResponse(
+        work_item_type=request.work_item_type,
+        project_name=request.project_name,
+        generated=generated,
+        ado_result=ado_result,
+    )
