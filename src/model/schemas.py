@@ -1,4 +1,5 @@
 from typing import Any, Dict, List, Optional
+
 from pydantic import BaseModel, Field
 
 
@@ -14,10 +15,10 @@ class GenerateRequest(BaseModel):
 class GeneratedWorkItem(BaseModel):
     title: str
     description: str
-    acceptanceCriteria: List[str]
-    tasks: List[str]
-    assumptions: List[str]
-    confidence: float
+    acceptanceCriteria: List[str] = Field(default_factory=list)
+    tasks: List[str] = Field(default_factory=list)
+    assumptions: List[str] = Field(default_factory=list)
+    confidence: float = 0.0
     extraFields: Dict[str, Any] = Field(default_factory=dict)
 
 
