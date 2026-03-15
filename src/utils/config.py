@@ -1,93 +1,72 @@
-import base64
-from typing import Any, Dict, List
+from typing import Optional
 
-import requests
-
-from src.utils.config import settings
-from src.utils.keyvault import get_secret_from_key_vault
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
-def _get_ado_pat() -> str:
-    if not settings.ADO_PAT_SECRET_NAME:
-        raise ValueError("ADO_PAT_SECRET_NAME is not configured.")
-    return get_secret_from_key_vault(settings.ADO_PAT_SECRET_NAME)
+class Settings(BaseSettings):
+    # ----------------------------------
+    # Azure OpenAI
+    # ----------------------------------
+    AZURE_OPENAI_ENDPOINT: str
+    AZURE_OPENAI_DEPLOYMENT: str
+    AZURE_OPENAI_API_VERSION: str = "2024-02-01"
 
+    # ----------------------------------
+    # Azure Identity / Key Vault
+    # ----------------------------------
+    AZURE_CLIENT_ID: Optional[str] = None
+    AZURE_TENANT_ID: Optional[str] = None
+    AZURE_KEY_VAULT_NAME: Optional[str] = None
+    AZURE_KEY_VAULT_URL: Optional[str] = None
 
-def _get_auth_headers() -> Dict[str, str]:
-    pat = _get_ado_pat()
-    encoded_pat = base64.b64encode(f":{pat}".encode("utf-8")).decode("utf-8")
+    # Key Vault secret names
+    AZURE_CLIENT_SECRET_SECRET_NAME: Optional[str] = None
+    ADO_PAT_SECRET_NAME: Optional[str] = None
 
-    return {
-        "Content-Type": "application/json-patch+json",
-        "Authorization": f"Basic {encoded_pat}",
-    }
+    # ----------------------------------
+    # Azure DevOps
+    # ----------------------------------
+    ADO_ORGANIZATION: Optional[str] = None
+    ADO_ORG_URL: Optional[str] = None
+    ADO_PROJECT: Optional[str] = None
+    ADO_DEFAULT_AREA_PATH: Optional[str] = None
+    ADO_DEFAULT_ITERATION_PATH: Optional[str] = None
 
+    # ----------------------------------
+    # App
+    # ----------------------------------
+    ENVIRONMENT: str = "local"
+    LOG_LEVEL: str = "INFO"
+    PORT: int = 8010
 
-def build_patch_document(
-    title: str,
-    description: str,
-    acceptance_criteria: List[str],
-    area_path: str | None = None,
-    iteration_path: str | None = None,
-    extra_fields: Dict[str, Any] | None = None,
-) -> List[Dict[str, Any]]:
-    patch_document: List[Dict[str, Any]] = [
-        {"op": "add", "path": "/fields/System.Title", "value": title},
-        {"op": "add", "path": "/fields/System.Description", "value": description},
-    ]
-
-    if acceptance_criteria:
-        ac_text = "<br/>".join([f"- {item}" for item in acceptance_criteria])
-        patch_document.append(
-            {
-                "op": "add",
-                "path": "/fields/Microsoft.VSTS.Common.AcceptanceCriteria",
-                "value": ac_text,
-            }
-        )
-
-    if area_path:
-        patch_document.append(
-            {"op": "add", "path": "/fields/System.AreaPath", "value": area_path}
-        )
-
-    if iteration_path:
-        patch_document.append(
-            {"op": "add", "path": "/fields/System.IterationPath", "value": iteration_path}
-        )
-
-    if extra_fields:
-        for field_name, field_value in extra_fields.items():
-            patch_document.append(
-                {"op": "add", "path": f"/fields/{field_name}", "value": field_value}
-            )
-
-    return patch_document
-
-
-def create_work_item(work_item_type: str, patch_document: List[Dict[str, Any]]) -> Dict[str, Any]:
-    org_url = settings.resolved_ado_org_url
-    if not org_url:
-        raise ValueError("ADO_ORG_URL or ADO_ORGANIZATION is not configured.")
-
-    if not settings.ADO_PROJECT:
-        raise ValueError("ADO_PROJECT is not configured.")
-
-    url = (
-        f"{org_url}/{settings.ADO_PROJECT}/_apis/wit/workitems/"
-        f"${work_item_type}?api-version=7.1"
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
     )
 
-    response = requests.post(
-        url,
-        headers=_get_auth_headers(),
-        json=patch_document,
-        timeout=30,
-    )
+    @property
+    def resolved_ado_org_url(self) -> Optional[str]:
+        if self.ADO_ORG_URL:
+            return self.ADO_ORG_URL.rstrip("/")
 
-    try:
-        response.raise_for_status()
-    except requests.HTTPError as exc:
-        raise RuntimeError(f"ADO create failed: {response.status_code} - {response.text}") from exc
+        if self.ADO_ORGANIZATION:
+            org = self.ADO_ORGANIZATION.strip().strip("/")
+            if org.startswith("http://") or org.startswith("https://"):
+                return org.rstrip("/")
+            return f"https://dev.azure.com/{org}"
 
-    return response.json()
+        return None
+
+    @property
+    def resolved_key_vault_url(self) -> Optional[str]:
+        if self.AZURE_KEY_VAULT_URL:
+            return self.AZURE_KEY_VAULT_URL.rstrip("/")
+
+        if self.AZURE_KEY_VAULT_NAME:
+            return f"https://{self.AZURE_KEY_VAULT_NAME}.vault.azure.net"
+
+        return None
+
+
+settings = Settings()
